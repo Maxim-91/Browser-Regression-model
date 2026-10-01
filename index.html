@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Linear Regression</title>
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        max-width: 1100px;
+        margin: 30px auto;
+        padding: 0 20px;
+        background: #f5f5f5;
+        color: #222;
+    }
+    .box {
+        background: white;
+        padding: 20px;
+        margin-bottom: 18px;
+        border-radius: 8px;
+        border: 1px solid #ddd;
+    }
+    button, input[type="number"] {
+        font-size: 16px;
+        padding: 8px 12px;
+    }
+    button {
+        cursor: pointer;
+    }
+    button:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+    }
+    .hidden { display: none; }
+    .target-list label, .feature-list label {
+        display: block;
+        margin: 7px 0;
+    }
+    .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+    }
+    .metric {
+        border: 1px solid #ccc;
+        padding: 12px;
+        border-radius: 6px;
+        background: #fafafa;
+    }
+    .metric strong {
+        display: block;
+        margin-bottom: 5px;
+    }
+    .split-row {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        flex-wrap: wrap;
+    }
+    .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 12px;
+    }
+    #trainSlider { flex: 1; }
+    .table-wrap {
+        overflow-x: auto;
+        max-height: 420px;
+        overflow-y: auto;
+    }
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        background: white;
+    }
+    th, td {
+        border: 1px solid #ccc;
+        padding: 7px;
+        text-align: right;
+    }
+    th {
+        position: sticky;
+        top: 0;
+        background: #eee;
+    }
+    #chart {
+        width: 100%;
+        max-width: 850px;
+        height: 500px;
+        border: 1px solid #ccc;
+        background: white;
+    }
+    .error {
+        color: #b00020;
+        font-weight: bold;
+    }
+    .info {
+        color: #444;
+    }
+    pre {
+        background: #f1f1f1;
+        padding: 12px;
+        overflow-x: auto;
+        border-radius: 5px;
+    }
+</style>
+</head>
+
+<body>
+<h1>Linear Regression</h1>
+
+<div class="box">
+    <h2>1. CSV-data</h2>
+    <button id="csvButton">Vie tiedot CSV-muotoon</button>
+    <input id="csvFile" type="file" accept=".csv,text/csv" class="hidden">
+    <p id="fileInfo" class="info">Valitse CSV-tiedosto.</p>
+</div>
+
+<div id="settings" class="box hidden">
+    <h2>2. Valitse target</h2>
+    <div id="targetList" class="target-list"></div>
+
+    <h3>Valitse käytettävät muuttujat</h3>
+    <p class="info">Kaikki muut numeeriset sarakkeet ovat aluksi valittuina.</p>
+    <div id="featureList" class="feature-list"></div>
+
+    <button id="regressionButton" disabled>Tee Regression-laskenta</button>
+</div>
+
+<div id="splitBox" class="box hidden">
+    <h2>3. Train test split</h2>
+
+    <div class="split-row">
+        <label>
+            Train:
+            <input id="trainInput" type="number" min="1" max="99" value="70">
+            %
+        </label>
+        <label>
+            Test:
+            <input id="testInput" type="number" min="1" max="99" value="30">
+            %
+        </label>
+    </div>
+
+    <div class="slider-row">
+        <span id="trainLabel">70%</span>
+        <input id="trainSlider" type="range" min="1" max="99" value="70">
+        <span id="testLabel">30%</span>
+    </div>
+</div>
+
+<div id="resultBox" class="box hidden">
+    <h2>4. Regression-tulokset</h2>
+
+    <div id="formula"></div>
+
+    <div class="metrics">
+        <div class="metric">
+            <strong>R² score</strong>
+            <span id="r2"></span>
+        </div>
+        <div class="metric">
+            <strong>Mean absolute error</strong>
+            <span id="mae"></span>
+        </div>
+        <div class="metric">
+            <strong>Mean squared error</strong>
+            <span id="mse"></span>
+        </div>
+        <div class="metric">
+            <strong>Root mean squared error</strong>
+            <span id="rmse"></span>
+        </div>
+    </div>
+
+    <h3>Train / Test -data</h3>
+    <pre id="splitInfo"></pre>
+
+    <h3>y_test vs. y_pred</h3>
+    <canvas id="chart" width="850" height="500"></canvas>
+</div>
+
+<div id="dataBox" class="box hidden">
+    <h2>CSV-taulukko</h2>
+    <div class="table-wrap">
+        <table id="dataTable"></table>
+    </div>
+</div>
+
+<p id="error" class="error"></p>
+
+<script>
+"use strict";
+
+let headers = [];
+let rows = [];
+let numericColumns = [];
+
+const csvButton = document.getElementById("csvButton");
+const csvFile = document.getElementById("csvFile");
+const settings = document.getElementById("settings");
+const splitBox = document.getElementById("splitBox");
+const resultBox = document.getElementById("resultBox");
+const dataBox = document.getElementById("dataBox");
+const targetList = document.getElementById("targetList");
+const featureList = document.getElementById("featureList");
+const regressionButton = document.getElementById("regressionButton");
+
+csvButton.addEventListener("click", () => csvFile.click());
+
+csvFile.addEventListener("change", () => {
+    const file = csvFile.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+        try {
+            loadCSV(reader.result, file.name);
+        } catch (error) {
+            showError("CSV-tiedoston lukeminen epäonnistui: " + error.message);
+        }
+    };
+    reader.readAsText(file);
+});
+
+function showError(message) {
+    document.getElementById("error").textContent = message;
+}
+
+function clearError() {
+    document.getElementById("error").textContent = "";
+}
+
+function detectSeparator(text) {
+    const firstLine = text.split(/\r?\n/)[0];
+    const semicolonCount = (firstLine.match(/;/g) || []).length;
+    const commaCount = (firstLine.match(/,/g) || []).length;
+    return semicolonCount > commaCount ? ";" : ",";
+}
+
+function parseCSV(text) {
+    text = text.replace(/^\uFEFF/, "");
+    const separator = detectSeparator(text);
+
+    const result = [];
+    let row = [];
+    let cell = "";
+    let quoted = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+
+        if (ch === '"') {
+            if (quoted && text[i + 1] === '"') {
+                cell += '"';
+                i++;
+            } else {
+                quoted = !quoted;
+            }
+        } else if (ch === separator && !quoted) {
+            row.push(cell);
+            cell = "";
+        } else if ((ch === "\n" || ch === "\r") && !quoted) {
+            if (ch === "\r" && text[i + 1] === "\n") i++;
+            row.push(cell);
+            cell = "";
+            if (row.some(value => value.trim() !== "")) result.push(row);
+            row = [];
+        } else {
+            cell += ch;
+        }
+    }
+
+    if (cell !== "" || row.length > 0) {
+        row.push(cell);
+        if (row.some(value => value.trim() !== "")) result.push(row);
+    }
+
+    return result;
+}
+
+function loadCSV(text, fileName) {
+    clearError();
+
+    const parsed = parseCSV(text);
+    if (parsed.length < 2) throw new Error("CSV-tiedostossa ei ole tarpeeksi rivejä.");
+
+    headers = parsed[0].map(h => h.trim());
+    rows = parsed.slice(1).map(row => {
+        const obj = {};
+        headers.forEach((header, i) => {
+            obj[header] = (row[i] ?? "").trim();
+        });
+        return obj;
+    });
+
+    numericColumns = headers.filter(header => {
+        let validCount = 0;
+        for (const row of rows) {
+            const value = toNumber(row[header]);
+            if (Number.isFinite(value)) validCount++;
+        }
+        return validCount >= Math.max(2, Math.ceil(rows.length * 0.8));
+    });
+
+    if (numericColumns.length < 2) {
+        throw new Error("CSV-tiedostossa tarvitaan vähintään kaksi numeerista saraketta.");
+    }
+
+    document.getElementById("fileInfo").textContent =
+        fileName + " ladattu: " + rows.length + " riviä.";
+
+    renderTable();
+    renderSelectors();
+
+    settings.classList.remove("hidden");
+    splitBox.classList.remove("hidden");
+    dataBox.classList.remove("hidden");
+    resultBox.classList.add("hidden");
+}
+
+function toNumber(value) {
+    if (typeof value === "number") return value;
+
+    let text = String(value).trim().replace(/\s/g, "");
+    if (text === "") return NaN;
+
+    // Support both 12.34 and 12,34 numeric values.
+    if (text.includes(",") && !text.includes(".")) {
+        text = text.replace(",", ".");
+    }
+
+    return Number(text);
+}
+
+function renderTable() {
+    const table = document.getElementById("dataTable");
+    table.innerHTML = "";
+
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+
+    headers.forEach(header => {
+        const th = document.createElement("th");
+        th.textContent = header;
+        headRow.appendChild(th);
+    });
+
+    head.appendChild(headRow);
+    table.appendChild(head);
+
+    const body = document.createElement("tbody");
+
+    rows.forEach(row => {
+        const tr = document.createElement("tr");
+        headers.forEach(header => {
+            const td = document.createElement("td");
+            td.textContent = row[header] ?? "";
+            tr.appendChild(td);
+        });
+        body.appendChild(tr);
+    });
+
+    table.appendChild(body);
+}
+
+function renderSelectors() {
+    targetList.innerHTML = "";
+    featureList.innerHTML = "";
+
+    numericColumns.forEach((column, index) => {
+        const label = document.createElement("label");
+        const radio = document.createElement("input");
+
+        radio.type = "radio";
+        radio.name = "target";
+        radio.value = column;
+        if (index === numericColumns.length - 1) radio.checked = true;
+
+        radio.addEventListener("change", updateFeatures);
+
+        label.appendChild(radio);
+        label.appendChild(document.createTextNode(" " + column));
+        targetList.appendChild(label);
+    });
+
+    updateFeatures();
+}
+
+function getTarget() {
+    const selected = document.querySelector('input[name="target"]:checked');
+    return selected ? selected.value : null;
+}
+
+function updateFeatures() {
+    const target = getTarget();
+    featureList.innerHTML = "";
+
+    numericColumns
+        .filter(column => column !== target)
+        .forEach(column => {
+            const label = document.createElement("label");
+            const checkbox = document.createElement("input");
+
+            checkbox.type = "checkbox";
+            checkbox.value = column;
+            checkbox.checked = true;
+
+            checkbox.addEventListener("change", updateRegressionButton);
+
+            label.appendChild(checkbox);
+            label.appendChild(document.createTextNode(" " + column));
+            featureList.appendChild(label);
+        });
+
+    resultBox.classList.add("hidden");
+    updateRegressionButton();
+}
+
+function getFeatures() {
+    return [...document.querySelectorAll('#featureList input[type="checkbox"]:checked')]
+        .map(input => input.value);
+}
+
+function updateRegressionButton() {
+    regressionButton.disabled = getFeatures().length === 0;
+}
+
+const trainSlider = document.getElementById("trainSlider");
+const trainInput = document.getElementById("trainInput");
+const testInput = document.getElementById("testInput");
+const trainLabel = document.getElementById("trainLabel");
+const testLabel = document.getElementById("testLabel");
+
+function setSplit(train) {
+    train = Math.round(Number(train));
+
+    if (!Number.isFinite(train)) train = 70;
+    train = Math.max(1, Math.min(99, train));
+
+    const test = 100 - train;
+
+    trainSlider.value = train;
+    trainInput.value = train;
+    testInput.value = test;
+
+    trainLabel.textContent = train + "%";
+    testLabel.textContent = test + "%";
+}
+
+trainSlider.addEventListener("input", () => setSplit(trainSlider.value));
+
+trainInput.addEventListener("input", () => {
+    const value = Number(trainInput.value);
+    if (Number.isFinite(value) && value >= 1 && value <= 99) {
+        setSplit(value);
+    }
+});
+
+testInput.addEventListener("input", () => {
+    const value = Number(testInput.value);
+    if (Number.isFinite(value) && value >= 1 && value <= 99) {
+        setSplit(100 - value);
+    }
+});
+
+setSplit(70);
+
+regressionButton.addEventListener("click", runRegression);
+
+function getCleanData(target, features) {
+    const clean = [];
+
+    rows.forEach(row => {
+        const y = toNumber(row[target]);
+        const x = features.map(feature => toNumber(row[feature]));
+
+        if (Number.isFinite(y) && x.every(Number.isFinite)) {
+            clean.push({ x, y });
+        }
+    });
+
+    return clean;
+}
+
+// Deterministic shuffle, similar in purpose to train_test_split(shuffle=True).
+function shuffle(data) {
+    const copy = data.slice();
+    let seed = 12345;
+
+    function random() {
+        seed = (seed * 9301 + 49297) % 233280;
+        return seed / 233280;
+    }
+
+    for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(random() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+
+    return copy;
+}
+
+// Solves A*x = b using Gaussian elimination.
+function solveLinearSystem(A, b) {
+    const n = A.length;
+    const M = A.map((row, i) => row.slice().concat([b[i]]));
+
+    for (let col = 0; col < n; col++) {
+        let pivot = col;
+
+        for (let row = col + 1; row < n; row++) {
+            if (Math.abs(M[row][col]) > Math.abs(M[pivot][col])) {
+                pivot = row;
+            }
+        }
+
+        if (Math.abs(M[pivot][col]) < 1e-12) {
+            throw new Error("Regression ei onnistunut: muuttujissa on liian vähän vaihtelua tai ne ovat riippuvia.");
+        }
+
+        [M[col], M[pivot]] = [M[pivot], M[col]];
+
+        for (let row = col + 1; row < n; row++) {
+            const factor = M[row][col] / M[col][col];
+
+            for (let k = col; k <= n; k++) {
+                M[row][k] -= factor * M[col][k];
+            }
+        }
+    }
+
+    const x = new Array(n).fill(0);
+
+    for (let i = n - 1; i >= 0; i--) {
+        let sum = M[i][n];
+
+        for (let j = i + 1; j < n; j++) {
+            sum -= M[i][j] * x[j];
+        }
+
+        x[i] = sum / M[i][i];
+    }
+
+    return x;
+}
+
+// Multiple linear regression:
+// y = b0 + b1*x1 + b2*x2 + ...
+function linearRegression(X, y) {
+    const p = X[0].length;
+    const size = p + 1;
+
+    const A = Array.from({ length: size }, () => Array(size).fill(0));
+    const b = Array(size).fill(0);
+
+    for (let i = 0; i < X.length; i++) {
+        const row = [1].concat(X[i]);
+
+        for (let j = 0; j < size; j++) {
+            b[j] += row[j] * y[i];
+
+            for (let k = 0; k < size; k++) {
+                A[j][k] += row[j] * row[k];
+            }
+        }
+    }
+
+    return solveLinearSystem(A, b);
+}
+
+function predict(X, coefficients) {
+    return X.map(row => {
+        let value = coefficients[0];
+
+        for (let i = 0; i < row.length; i++) {
+            value += coefficients[i + 1] * row[i];
+        }
+
+        return value;
+    });
+}
+
+function calculateMetrics(yTrue, yPred) {
+    const n = yTrue.length;
+    const mean = yTrue.reduce((sum, value) => sum + value, 0) / n;
+
+    let absolute = 0;
+    let squared = 0;
+    let total = 0;
+
+    for (let i = 0; i < n; i++) {
+        const error = yTrue[i] - yPred[i];
+        absolute += Math.abs(error);
+        squared += error * error;
+        total += (yTrue[i] - mean) ** 2;
+    }
+
+    const mae = absolute / n;
+    const mse = squared / n;
+    const rmse = Math.sqrt(mse);
+    const r2 = total === 0 ? NaN : 1 - squared / total;
+
+    return { r2, mae, mse, rmse };
+}
+
+function runRegression() {
+    clearError();
+
+    try {
+        const target = getTarget();
+        const features = getFeatures();
+        const trainPercent = Number(trainSlider.value);
+
+        if (!target || features.length === 0) {
+            throw new Error("Valitse target ja vähintään yksi muuttuja.");
+        }
+
+        const clean = getCleanData(target, features);
+
+        if (clean.length < features.length + 2) {
+            throw new Error("Käyttökelpoisia rivejä on liian vähän regression laskemiseen.");
+        }
+
+        const shuffled = shuffle(clean);
+        let trainCount = Math.floor(shuffled.length * trainPercent / 100);
+        trainCount = Math.max(features.length + 1, trainCount);
+        trainCount = Math.min(shuffled.length - 1, trainCount);
+
+        const train = shuffled.slice(0, trainCount);
+        const test = shuffled.slice(trainCount);
+
+        const X_train = train.map(item => item.x);
+        const X_test = test.map(item => item.x);
+        const y_train = train.map(item => item.y);
+        const y_test = test.map(item => item.y);
+
+        const coefficients = linearRegression(X_train, y_train);
+        const y_pred = predict(X_test, coefficients);
+
+        const metrics = calculateMetrics(y_test, y_pred);
+
+        document.getElementById("r2").textContent = formatNumber(metrics.r2);
+        document.getElementById("mae").textContent = formatNumber(metrics.mae);
+        document.getElementById("mse").textContent = formatNumber(metrics.mse);
+        document.getElementById("rmse").textContent = formatNumber(metrics.rmse);
+
+        let formula = "y = " + formatNumber(coefficients[0]);
+
+        features.forEach((feature, i) => {
+            const coefficient = coefficients[i + 1];
+            formula += (coefficient >= 0 ? " + " : " - ")
+                + formatNumber(Math.abs(coefficient))
+                + " × " + feature;
+        });
+
+        document.getElementById("formula").innerHTML =
+            "<p><strong>Regressiomalli:</strong> " + escapeHtml(formula) + "</p>";
+
+        document.getElementById("splitInfo").textContent =
+            "X_train: " + X_train.length + " riviä\n" +
+            "X_test: " + X_test.length + " riviä\n" +
+            "y_train: " + y_train.length + " arvoa\n" +
+            "y_test: " + y_test.length + " arvoa\n\n" +
+            "Train: " + trainPercent + "%\n" +
+            "Test: " + (100 - trainPercent) + "%";
+
+        resultBox.classList.remove("hidden");
+        drawScatter(y_test, y_pred);
+
+    } catch (error) {
+        resultBox.classList.add("hidden");
+        showError(error.message);
+    }
+}
+
+function formatNumber(value) {
+    if (!Number.isFinite(value)) return "N/A";
+    return Number(value).toFixed(4);
+}
+
+function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+    }[char]));
+}
+
+function drawScatter(yTrue, yPred) {
+    const canvas = document.getElementById("chart");
+    const ctx = canvas.getContext("2d");
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const padding = 65;
+    const width = canvas.width - padding * 2;
+    const height = canvas.height - padding * 2;
+
+    const allValues = yTrue.concat(yPred);
+    let min = Math.min(...allValues);
+    let max = Math.max(...allValues);
+
+    if (min === max) {
+        min -= 1;
+        max += 1;
+    }
+
+    const margin = (max - min) * 0.08;
+    min -= margin;
+    max += margin;
+
+    function xPixel(value) {
+        return padding + (value - min) / (max - min) * width;
+    }
+
+    function yPixel(value) {
+        return canvas.height - padding - (value - min) / (max - min) * height;
+    }
+
+    // Axes
+    ctx.strokeStyle = "#222";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padding, padding);
+    ctx.lineTo(padding, canvas.height - padding);
+    ctx.lineTo(canvas.width - padding, canvas.height - padding);
+    ctx.stroke();
+
+    // y = x reference line
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(xPixel(min), yPixel(min));
+    ctx.lineTo(xPixel(max), yPixel(max));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Points
+    ctx.fillStyle = "#333";
+
+    for (let i = 0; i < yTrue.length; i++) {
+        ctx.beginPath();
+        ctx.arc(xPixel(yTrue[i]), yPixel(yPred[i]), 4, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.fillStyle = "#222";
+    ctx.font = "14px Arial";
+
+    ctx.fillText("y_test", canvas.width / 2 - 20, canvas.height - 18);
+
+    ctx.save();
+    ctx.translate(18, canvas.height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("y_pred", 0, 0);
+    ctx.restore();
+
+    ctx.fillText("y = x", canvas.width - 95, 35);
+}
+</script>
+</body>
+</html>
